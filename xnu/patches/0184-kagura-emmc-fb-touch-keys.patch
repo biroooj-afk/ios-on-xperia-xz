@@ -1,0 +1,254 @@
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -40,8 +40,8 @@
+  * Early boot log (osfmk/arm64/sweet_early.c): the Pixel 1 ramoops console
+  * zone and the 32MB block start.s / arm_vm_init map around it.
+  */
+-#define SWEET_EARLY_LOG_BLOCK     0x82000000
+-#define SWEET_EARLY_LOG_PRZ       0x83540000
++#define SWEET_EARLY_LOG_BLOCK     0x9e000000
++#define SWEET_EARLY_LOG_PRZ       0x9ff40000
+ 
+ #define HAS_GIC_V3                1
+ 
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -805,11 +805,11 @@
+ 		uint32_t layer = os_atomic_xchg(&fbcon_layer_next, 0u, relaxed);
+ 		uint32_t flush = 0;
+ 		if (src != 0 && fbcon_vig0 != NULL) {
+ 			fbcon_vig0[0x14 / 4] = (uint32_t)src;           /* SRC0_ADDR */
+ 			fbcon_vig0[0x24 / 4] = fbcon_src_stride;        /* SRC_YSTRIDE0 */
+ 			fbcon_vig0[0x30 / 4] = 0x000236ffu;             /* SRC_FORMAT: XRGB8888, 4 bpp */
+ 			fbcon_vig0[0x34 / 4] = 0x03020001u;             /* UNPACK: bytes B, G, R, X */
+-			flush |= 1u;                                    /* VIG0 */
++			flush |= (1u << 0) | (1u << 3);                 /* VIG0 (bit 0) + RGB0 (bit 3) */
+ 		}
+ 		if (layer != 0) {
+ 			fbcon_kickoff[-7] = layer;                      /* CTL0 LAYER(LM0) */
+@@ -961,7 +961,15 @@
+ 		uint64_t vig = *kick - 0x1c + 0x3000;
+ 		page = ml_io_map(trunc_page_64(vig), PAGE_SIZE);
+ 		if (page != 0) {
+ 			fbcon_vig0 = (volatile uint32_t *)(page + (vig & PAGE_MASK));
++			/* If Sony aboot left VIG0 empty, check RGB0 at MDP + 0x14000 (0x915000) */
++			if (fbcon_vig0[0x14 / 4] == 0) {
++				uint64_t rgb0 = vig + 0x10000;
++				vm_offset_t rpage = ml_io_map(trunc_page_64(rgb0), PAGE_SIZE);
++				if (rpage != 0 && *(volatile uint32_t *)(rpage + (rgb0 & PAGE_MASK) + 0x14) != 0) {
++					fbcon_vig0 = (volatile uint32_t *)(rpage + (rgb0 & PAGE_MASK));
++				}
++			}
+ 		}
+ 		/* MDP top (mdss base + 0x1000) INTR_STATUS +0x14, CLEAR +0x18 */
+ 		uint64_t intr = (*kick & ~0xffffull) + 0x1014;
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -361,8 +361,8 @@
+  * the kernel text console (24 bpp in the old buffer) no longer shows.
+  * Boot-arg sweetfb_gpu=0 keeps the CPU copy.
+  */
+-#define SWEET_FB_GPU_PA0        0xc0800000ull
+-#define SWEET_FB_GPU_PA1        0xc1000000ull
++#define SWEET_FB_GPU_PA0        0x84000000ull
++#define SWEET_FB_GPU_PA1        0x84800000ull
+ #define SWEET_FB_GPU_SLOT       0x00800000ull
+ 
+ bool
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -32,8 +32,8 @@
+ #define KEYS_NO_APID     0xffffu
+ /* pinctrl@1010000, one 4 KiB tile per GPIO: CFG +0, IN_OUT +4 */
+ #define KEYS_TLMM_PA     0x01010000u
+-#define KEYS_GPIO_VOLUP  126u
+-#define KEYS_GPIO_VOLDN  121u
++#define KEYS_GPIO_VOLUP  90u     /* Sony Xperia XZ camera focus/key -> VolUp */
++#define KEYS_GPIO_VOLDN  87u     /* Sony Xperia XZ VolDown -> Home button */
+ 
+ enum { KEY_POWER = 0, KEY_VOLUP = 1, KEY_HOME = 3 };
+ 
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -35,12 +35,12 @@
+ void sweet_touch_init(void);
+ 
+ #define TOUCH_GCC_VOTE_PA 0x00352000u   /* +4: APCS_CLOCK_BRANCH_ENA_VOTE */
+-#define TOUCH_GCC_QUP_PA  0x0031d000u   /* +8: QUP3 I2C CBCR, +0x20: RCGR */
+-#define TOUCH_QUP_PA      0x07577000u
++#define TOUCH_GCC_QUP_PA  0x0031b000u   /* +0x10: BLSP1 QUP2 I2C APPS CBCR */
++#define TOUCH_QUP_PA      0x07576000u   /* Sony kagura: BLSP1 QUP2 (0x7576000) */
+ #define TOUCH_TLMM_PA     0x01010000u   /* one 4 KiB tile per GPIO: CFG +0, IN_OUT +4 */
+-#define TOUCH_SDA         47u
+-#define TOUCH_SCL         48u
+-#define TOUCH_RESET       89u
+-#define TOUCH_ATTN        125u
++#define TOUCH_SDA         43u           /* Sony kagura blsp_i2c2_sda */
++#define TOUCH_SCL         44u           /* Sony kagura blsp_i2c2_scl */
++#define TOUCH_RESET       64u           /* Sony kagura ts_reset_n */
++#define TOUCH_ATTN        65u           /* Sony kagura ts_int_n */
+ #define TOUCH_SWITCH      80u
+ #define TOUCH_ADDR        0x20u
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -162,6 +162,107 @@
+ 	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
+ }
+ 
++/*
++ * Sony Xperia XZ (kagura) SDHCI eMMC 5.1 Polled Block Backend (SDCC1 @ 0x740000).
++ * Reuses the eMMC host state left in Transfer State by Sony's aboot bootloader.
++ * Exposes 4 KiB logical blocks (8 x 512B eMMC sectors) so the rest of sweet_ufs.c
++ * (GPT parser, bounce buffer, HFS+ root mount, and log ring) works unchanged.
++ */
++#define SDHCI_DMA_ADDRESS       0x00
++#define SDHCI_BLOCK_SIZE        0x04    /* 16-bit block size + 16-bit block count */
++#define SDHCI_ARGUMENT          0x08
++#define SDHCI_TRANSFER_MODE     0x0c    /* 16-bit xfer mode + 16-bit command */
++#define SDHCI_RESPONSE          0x10
++#define SDHCI_BUFFER            0x20
++#define SDHCI_PRESENT_STATE     0x24
++#define SDHCI_INT_STATUS        0x30
++#define SDHCI_INT_ENABLE        0x34
++#define SDHCI_SIGNAL_ENABLE     0x38
++#define SDHCI_SOFTWARE_RESET    0x2f
++
++#define SDHCI_CMD_INHIBIT       0x00000001u
++#define SDHCI_DATA_INHIBIT      0x00000002u
++#define SDHCI_SPACE_AVAILABLE   0x00000400u
++#define SDHCI_DATA_AVAILABLE    0x00000800u
++#define SDHCI_INT_RESPONSE      0x00000001u
++#define SDHCI_INT_DATA_END      0x00000002u
++#define SDHCI_INT_SPACE_AVAIL   0x00000010u
++#define SDHCI_INT_DATA_AVAIL    0x00000020u
++#define SDHCI_INT_ERROR_MASK    0x01ff8000u
++
++static int
++sdhci_xfer_blocks(uint64_t lba_4k, uint32_t count_4k, bool write)
++{
++	uint64_t sec = lba_4k * 8ull;
++	uint32_t nsec = count_4k * 8u;
++	uint32_t *buf = (uint32_t *)(su.dma + DMA_BOUNCE);
++
++	if (sec > UINT32_MAX || count_4k == 0 || count_4k > BOUNCE_SIZE / UFS_BLOCK) {
++		return EINVAL;
++	}
++	for (int t = 0; t < 100000; t++) {
++		if (!(ufs_rd(SDHCI_PRESENT_STATE) & (SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT))) {
++			break;
++		}
++		delay(1);
++	}
++	ufs_wr(SDHCI_SIGNAL_ENABLE, 0);
++	ufs_wr(SDHCI_INT_ENABLE, 0x03ff00ffu);
++	ufs_wr(SDHCI_INT_STATUS, 0xffffffffu);
++
++	/* 512-byte blocks, nsec count (PIO mode: clear DMA enable bit 0 in xfer mode) */
++	ufs_wr(SDHCI_BLOCK_SIZE, (nsec << 16) | 512u);
++	ufs_wr(SDHCI_ARGUMENT, (uint32_t)sec);
++	uint32_t mode = (1u << 1) | (1u << 2) | (write ? 0u : (1u << 4)) | (nsec > 1 ? (1u << 5) : 0u);
++	uint32_t cmd = ((nsec > 1 ? (write ? 25u : 18u) : (write ? 24u : 17u)) << 8) | 0x3au;
++	ufs_wr(SDHCI_TRANSFER_MODE, (cmd << 16) | mode);
++
++	for (int t = 0; t < 500000; t++) {
++		uint32_t st = ufs_rd(SDHCI_INT_STATUS);
++		if (st & SDHCI_INT_ERROR_MASK) {
++			ufs_wr(SDHCI_INT_STATUS, 0xffffffffu);
++			return EIO;
++		}
++		if (st & SDHCI_INT_RESPONSE) {
++			ufs_wr(SDHCI_INT_STATUS, SDHCI_INT_RESPONSE);
++			break;
++		}
++		delay(1);
++	}
++	for (uint32_t s = 0; s < nsec; s++) {
++		uint32_t want_mask = write ? SDHCI_SPACE_AVAILABLE : SDHCI_DATA_AVAILABLE;
++		uint32_t int_Bit = write ? SDHCI_INT_SPACE_AVAIL : SDHCI_INT_DATA_AVAIL;
++		int t;
++		for (t = 0; t < 500000; t++) {
++			uint32_t st = ufs_rd(SDHCI_INT_STATUS);
++			if (st & SDHCI_INT_ERROR_MASK) {
++				ufs_wr(SDHCI_INT_STATUS, 0xffffffffu);
++				return EIO;
++			}
++			if ((ufs_rd(SDHCI_PRESENT_STATE) & want_mask) || (st & int_Bit)) {
++				ufs_wr(SDHCI_INT_STATUS, int_Bit);
++				break;
++			}
++			delay(1);
++		}
++		if (t == 500000) {
++			return ETIMEDOUT;
++		}
++		for (int w = 0; w < 128; w++) {
++			if (write) {
++				ufs_wr(SDHCI_BUFFER, *buf++);
++			} else {
++				*buf++ = ufs_rd(SDHCI_BUFFER);
++			}
++		}
++	}
++	for (int t = 0; t < 500000; t++) {
++		if (ufs_rd(SDHCI_INT_STATUS) & SDHCI_INT_DATA_END) {
++			ufs_wr(SDHCI_INT_STATUS, 0xffffffffu);
++			break;
++		}
++		delay(1);
++	}
++	return 0;
++}
++
+ /*
+  * One SCSI command in slot 0, data (if any) to/from the bounce buffer
+  * (to the device when write is set). Returns 0 or an errno.
+@@ -261,6 +362,7 @@
+ static int
+ ufs_read_blocks(uint64_t lba, uint32_t count)
+ {
++	if (1) return sdhci_xfer_blocks(lba, count, false);
+ 	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
+ 		return EINVAL;
+ 	}
+@@ -282,6 +384,7 @@
+ 		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
+ 		return EPERM;
+ 	}
++	if (1) return sdhci_xfer_blocks(lba, count, true);
+ 	uint8_t cdb[10] = {
+ 		0x2a, 0,
+ 		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+@@ -293,6 +396,7 @@
+ static int
+ ufs_sync_cache(void)
+ {
++	if (1) return 0;
+ 	static const uint8_t cdb[10] = { 0x35 };       /* SYNCHRONIZE CACHE(10), whole LUN */
+ 	return ufs_scsi(cdb, sizeof(cdb), 0, false);
+ }
+@@ -355,6 +459,10 @@
+ static int
+ ufs_take_over_host(void)
+ {
++	printf("SWEET SDHCI (eMMC): present_state=0x%x int_status=0x%x\n",
++	    ufs_rd(SDHCI_PRESENT_STATE), ufs_rd(SDHCI_INT_STATUS));
++	if (1) return 0;
++
+ 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+ 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
+ 		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
+@@ -625,7 +733,7 @@
+ 	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
+ 		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++		for (int i = 0; i < 0 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+ 		}
+ 	}
+ 	if (!error) {
+@@ -665,7 +773,6 @@
+ 	sweet_touch_init();
+-	sailfish_wlan_init();
+ 	sweet_usb_probe();
+ 	sweet_perf_init();
+ 	sweet_gpu_init();
