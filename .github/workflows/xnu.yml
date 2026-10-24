@@ -1,3 +1,0 @@
-git add .github/workflows/
-git commit -m "Add xnu GitHub Actions workflow"
-git push
