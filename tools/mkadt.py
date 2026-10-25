@@ -49,8 +49,20 @@ D20AP_ADT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../researc
 
 def d22ap_product(path=D22AP_ADT):
     if not os.path.exists(path):
-        print(f'warning: {path} missing, no /product node', file=sys.stderr)
-        return None
+        # Built-in iPhone 8 (D20AP) /product fallback when IPSW d20ap.adt is not in research/
+        return [
+            ('product-name', cstr('iPhone 8')),
+            ('product-description', cstr('iPhone 8')),
+            ('product-id', u32(1)),
+            ('device-color-policy', u32(1)),
+            ('artwork-device-idiom', cstr('phone')),
+            ('artwork-scale-factor', u32(2)),
+            ('artwork-device-subtype', u32(1334)),
+            ('artwork-display-gamut', cstr('sRGB')),
+            ('display-gamut', cstr('sRGB')),
+            ('oled-display', u32(0)),
+            ('island-notch-location', u32(0)),
+        ]
     root, _ = adt.parse(open(path, 'rb').read())
     for c in root.children:
         if dict((k, v) for k, f, v in c.props).get('name') == b'product\0':
