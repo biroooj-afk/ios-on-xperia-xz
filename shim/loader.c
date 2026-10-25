@@ -82,7 +82,7 @@ static int magic_ok(const char *m)
  */
 static void patch_adt_fb(uintptr_t adt_pa, uint64_t adt_size, uint64_t live_fb)
 {
-	for (uint64_t off = 0; off + 16 <= adt_size; off += 4) {
+	for (uint64_t off = 0; off + 64 <= adt_size; off += 4) {
 		volatile uint32_t *w = (volatile uint32_t *)(adt_pa + off);
 		uint64_t val = (uint64_t)w[0] | ((uint64_t)w[1] << 32);
 		uint64_t sz  = (uint64_t)w[2] | ((uint64_t)w[3] << 32);
@@ -90,6 +90,14 @@ static void patch_adt_fb(uintptr_t adt_pa, uint64_t adt_size, uint64_t live_fb)
 			w[0] = (uint32_t)live_fb;
 			w[1] = (uint32_t)(live_fb >> 32);
 			plog_hex("ADT fb patched to", live_fb);
+			/* Also patch stride and bits-per-pixel right after width/height in sweet-fbcon */
+			for (uint64_t k = 4; k < 40 && off + k * 4 < adt_size; k++) {
+				if (w[k] == 0xca8U && w[k - 1] == 4U) {
+					w[k] = active_stride;
+				} else if (w[k] == 24U && w[k - 1] == 4U) {
+					w[k] = active_bpp * 8U;
+				}
+			}
 			break;
 		}
 	}

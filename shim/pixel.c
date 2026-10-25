@@ -1,7 +1,7 @@
 /*
  * Sony Xperia XZ Dual (kagura, MSM8996) shim, adapted from Pixel 1 (sailfish).
  * Screen: the bootloader's splash setup (MDP VIG0/RGB0 -> LM0 -> CTL0 -> INTF1/DSI0,
- * command-mode 1080x1920 panel), see console.c.
+ * 1080x1920 panel), see console.c.
  * Progress also goes to the pstore console zone; after the PSCI reset read it
  * from Android/TWRP: adb shell cat /sys/fs/pstore/console-ramoops*
  */
@@ -70,8 +70,12 @@ void shim_main(uint64_t dtb)
 	wr32(APSS_WDT + WDT_RST, 1);
 	wr32(APSS_WDT + WDT_EN, 1);
 #endif
-	uintptr_t tags = (dtb >= 0x80000000UL && dtb < 0x100000000UL) ? (uintptr_t)dtb : DEFAULT_TAGS_ADDR;
-	const char *why = loader_boot_rd((uintptr_t)_end, tags);
+	uintptr_t pay = ((uintptr_t)_end + 7UL) & ~7UL;
+	const char *why = loader_boot_rd(pay, pay + 0x04000000UL);
+	if (why != 0) {
+		uintptr_t tags = (dtb >= 0x80000000UL && dtb < 0x100000000UL) ? (uintptr_t)dtb : DEFAULT_TAGS_ADDR;
+		why = loader_boot(tags);
+	}
 	plog_str("LOADER: ");
 	plog_str(why);
 	plog_str("\n");
